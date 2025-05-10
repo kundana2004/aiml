@@ -1,0 +1,439 @@
+from tkinter import messagebox
+from tkinter import *
+from tkinter import simpledialog
+import tkinter
+from tkinter import filedialog
+from imutils import paths
+import matplotlib.pyplot as plt
+from tkinter.filedialog import askopenfilename
+import cv2
+import shutil
+import os
+from imageai.Classification import ImageClassification  # Updated import
+import threading
+import time
+
+main = tkinter.Tk()
+main.title("Suspicious Activity Detection")
+main.geometry("1300x800")
+
+# Set custom colors and styles
+BG_COLOR = "#0f1729"  # Rich dark blue
+BG_GRADIENT = "linear-gradient(135deg, #0f1729 0%, #1e3a8a 100%)"  # Elegant gradient
+BUTTON_COLOR = "#3b82f6"  # Modern blue
+BUTTON_HOVER = "#2563eb"  # Darker blue for hover
+TEXT_COLOR = "#f8fafc"  # Soft white
+HEADER_COLOR = "#1e293b"  # Dark slate
+TEXT_AREA_BG = "#ffffff"  # Pure white
+CARD_BG = "rgba(255, 255, 255, 0.1)"  # Glass effect background
+BORDER_RADIUS = 12  # Consistent rounded corners
+
+# Configure main window with modern styling
+main.configure(bg=BG_COLOR)
+
+# Create gradient effect background
+gradient_canvas = Canvas(main, highlightthickness=0)
+gradient_canvas.place(relwidth=1, relheight=1)
+
+# Create gradient using multiple lines
+for i in range(1200):
+    color = f'#{int(15 + (i/1200)*25):02x}{int(23 + (i/1200)*35):02x}{int(41 + (i/1200)*89):02x}'
+    gradient_canvas.create_line(0, i, 1300, i, fill=color)
+
+global filename
+global is_live_feed
+global stop_live_feed
+global recorded_video_path
+
+is_live_feed = False
+stop_live_feed = False
+recorded_video_path = None
+execution_path = os.getcwd()
+
+# Updated Model Prediction Setup for ImageAI 3.0.3
+prediction = ImageClassification()
+prediction.setModelTypeAsDenseNet121()  # Using DenseNet121 instead of CustomImagePrediction
+prediction.setModelPath(r"densenet121.pth")  # Load the ONNX model file (replace with your model file)
+prediction.loadModel()
+
+def toggle_live_feed():
+    global is_live_feed, stop_live_feed, recorded_video_path
+    is_live_feed = not is_live_feed
+    if is_live_feed:
+        live_button.config(text="Stop Live Feed")
+        upload_button.config(state=DISABLED)
+        depthbutton.config(state=DISABLED)
+        userinterest.config(state=DISABLED)
+        stop_live_feed = False
+        threading.Thread(target=process_live_feed, daemon=True).start()
+    else:
+        live_button.config(text="Start Live Feed")
+        upload_button.config(state=NORMAL)
+        depthbutton.config(state=NORMAL)
+        userinterest.config(state=NORMAL)
+        stop_live_feed = True
+
+def process_live_feed():
+    global recorded_video_path
+    cap = cv2.VideoCapture(0)  # Use default camera
+    if not cap.isOpened():
+        messagebox.showerror("Error", "Could not access the camera!")
+        toggle_live_feed()
+        return
+
+    # Set up video writer
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = 20.0
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    recorded_video_path = os.path.join('videos', f'recorded_{timestamp}.mp4')
+    
+    # Ensure videos directory exists
+    if not os.path.exists('videos'):
+        os.makedirs('videos')
+    
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(recorded_video_path, fourcc, fps, (frame_width, frame_height))
+
+    frame_buffer = []
+    confidence_scores = []
+    prev_prediction = None
+    consecutive_count = 0
+    detection_window = 5
+    min_confidence = 60
+    text1.delete('1.0', END)
+    
+    # Ensure frames directory exists and is clean
+    if not os.path.exists('frames'):
+        os.mkdir('frames')
+    else:
+        # Clean up existing live frame files
+        for file in os.listdir('frames'):
+            if file.startswith('live_frame_'):
+                os.remove(os.path.join('frames', file))
+    
+    while is_live_feed and not stop_live_feed:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        try:
+            # Save frame for processing and record video
+            out.write(frame)
+            frame_path = os.path.join('frames', f'live_frame_{len(frame_buffer)}.jpg')
+            cv2.imwrite(frame_path, frame)
+            
+            # Process the frame
+            predictions, probabilities = prediction.classifyImage(frame_path, result_count=2)
+            top_prediction = predictions[0]
+            top_probability = float(probabilities[0])
+            
+            # Store confidence score for temporal analysis
+            confidence_scores.append(top_probability)
+            if len(confidence_scores) > detection_window:
+                confidence_scores.pop(0)
+            
+            # Calculate average confidence
+            avg_confidence = sum(confidence_scores) / len(confidence_scores)
+            
+            # Update detection status
+            status_color = (0, 255, 0)  # Default green
+            status_text = f"{top_prediction}: {top_probability:.2f}%"
+            
+            if top_probability > min_confidence:
+                if prev_prediction == top_prediction:
+                    consecutive_count += 1
+                    if consecutive_count >= 3 and avg_confidence > 80:
+                        status_color = (0, 0, 255)  # Red for high confidence detection
+                        text1.delete('1.0', END)
+                        text1.insert(END, f"Alert: {top_prediction}\nConfidence: {top_probability:.2f}%\n")
+                        text1.insert(END, f"Temporal Consistency: {consecutive_count} frames\n")
+                        text1.insert(END, f"Average Confidence: {avg_confidence:.2f}%\n")
+                else:
+                    consecutive_count = 1
+                prev_prediction = top_prediction
+            else:
+                consecutive_count = max(0, consecutive_count - 1)
+
+            # Add frame to buffer after successful processing
+            frame_buffer.append(frame_path)
+
+            # Keep only last 5 frames for analysis
+            if len(frame_buffer) > 5:
+                old_frame = frame_buffer.pop(0)
+                if os.path.exists(old_frame):
+                    os.remove(old_frame)
+
+            # Display frame with enhanced visualization
+            cv2.putText(frame, status_text, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+            cv2.putText(frame, f"Avg Conf: {avg_confidence:.2f}%", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+            cv2.imshow('Live Feed', frame)
+
+        except Exception as e:
+            print(f"Error processing frame: {str(e)}")
+            continue
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    out.release()
+    cv2.destroyAllWindows()
+    
+    # Cleanup frames
+    for frame_path in frame_buffer:
+        if os.path.exists(frame_path):
+            os.remove(frame_path)
+            
+    # Update the filename for frame generation
+    if recorded_video_path and os.path.exists(recorded_video_path):
+        generateFrame.filename = recorded_video_path
+        pathlabel.config(text=f"Recorded video saved as: {recorded_video_path}")
+
+def generateFrame():
+    global filename
+    video_to_process = generateFrame.filename if hasattr(generateFrame, 'filename') else filename
+    
+    if not video_to_process:
+        messagebox.showerror("Error", "Please select a video file or record one first!")
+        return
+    
+    text.delete('1.0', END)
+    if not os.path.exists('frames'):
+        os.mkdir('frames')
+    else:
+        shutil.rmtree('frames')
+        os.mkdir('frames')
+    
+    vidObj = cv2.VideoCapture(video_to_process)
+    count = 0
+    success = 1
+    while success:
+        success, image = vidObj.read() 
+        if success and count < 500:
+            frame_path = f"frames/frame{count}.jpg"
+            cv2.imwrite(frame_path, image)
+            text.insert(END, f"{frame_path} saved\n")
+            print(f"{frame_path} saved")
+        else:
+            break
+        count += 1
+    pathlabel.config(text="Frame generation process completed. All frames saved inside frame folder")
+
+def detectActivity():
+    imagePaths = sorted(list(paths.list_images("frames")))
+    count = 0
+    option = 0
+    text1.delete('1.0', END)
+    
+    # Create directory for suspicious frames if it doesn't exist
+    suspicious_frames_dir = 'suspicious_frames'
+    if os.path.exists(suspicious_frames_dir):
+        shutil.rmtree(suspicious_frames_dir)
+    os.makedirs(suspicious_frames_dir)
+    
+    # Initialize variables for tracking consecutive detections and confidence scores
+    prev_prediction = None
+    consecutive_count = 0
+    confidence_scores = []
+    detection_window = 5  # Number of frames to consider for temporal consistency
+    min_confidence = 60  # Lower threshold for initial detection
+    high_confidence = 85  # Threshold for high confidence detections
+    
+    for imagePath in imagePaths:
+        predictions, probabilities = prediction.classifyImage(imagePath, result_count=3)  # Get top 3 predictions
+        
+        # Get the top predictions and their probabilities
+        top_prediction = predictions[0]
+        top_probability = float(probabilities[0])
+        second_prediction = predictions[1]
+        second_probability = float(probabilities[1])
+        
+        # Store confidence score for temporal analysis
+        confidence_scores.append(top_probability)
+        if len(confidence_scores) > detection_window:
+            confidence_scores.pop(0)
+        
+        # Calculate average confidence over the detection window
+        avg_confidence = sum(confidence_scores) / len(confidence_scores)
+        
+        # Enhanced detection logic with temporal consistency
+        if top_probability > min_confidence:
+            # Check for temporal consistency
+            if prev_prediction == top_prediction:
+                consecutive_count += 1
+                # Increase confidence if we see consistent predictions
+                if consecutive_count >= 3 and avg_confidence > high_confidence:
+                    option = 1
+                    detection_message = f"High Confidence Detection!\n"
+                    detection_message += f"Primary: {top_prediction} ({top_probability:.2f}%)\n"
+                    detection_message += f"Secondary: {second_prediction} ({second_probability:.2f}%)\n"
+                    detection_message += f"Temporal Consistency: {consecutive_count} frames\n"
+                    detection_message += f"Average Confidence: {avg_confidence:.2f}%\n"
+                    
+                    # Copy the suspicious frame to dedicated directory
+                    frame_name = os.path.basename(imagePath)
+                    suspicious_frame_path = os.path.join(suspicious_frames_dir, frame_name)
+                    shutil.copy2(imagePath, suspicious_frame_path)
+                    
+                    # Display the suspicious frame
+                    frame = cv2.imread(imagePath)
+                    if frame is not None:
+                        # Add text overlay with detection information
+                        cv2.putText(frame, f"{top_prediction}: {top_probability:.2f}%", (10, 30),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                        cv2.putText(frame, f"Avg Conf: {avg_confidence:.2f}%", (10, 60),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                        
+                        # Show the frame
+                        cv2.imshow('Suspicious Activity Detected', frame)
+                        cv2.waitKey(1000)  # Display each frame for 1 second
+                    
+                    print(f"High confidence detection in {imagePath}")
+                    print(detection_message)
+                    
+                    text1.insert(END, detection_message + "\n")
+            else:
+                # New prediction - start counting again
+                consecutive_count = 1
+            
+            prev_prediction = top_prediction
+            
+            # Log potential suspicious activity even with lower confidence
+            if consecutive_count >= 2 and not option:
+                print(f"Potential activity in {imagePath}: {top_prediction} ({top_probability:.2f}%)")
+                text1.insert(END, f"Monitoring: {top_prediction}\nConfidence: {top_probability:.2f}%\n\n")
+        else:
+            consecutive_count = max(0, consecutive_count - 1)  # Gradually decrease count instead of resetting
+            
+        print(f"{imagePath} processed - Confidence: {top_probability:.2f}%")
+    
+    cv2.destroyAllWindows()
+    
+    if option == 0:
+        if max(confidence_scores) > min_confidence:
+            text1.insert(END, f"No confirmed suspicious activity, but detected potential activities\nHighest confidence: {max(confidence_scores):.2f}%")
+        else:
+            text1.insert(END, "No suspicious activity detected in the footage")
+    else:
+        text1.insert(END, f"\nSuspicious frames have been saved to: {suspicious_frames_dir}\n")
+
+def upload():
+    global filename
+    filename = askopenfilename(initialdir="videos")
+    pathlabel.config(text=filename)
+
+# Create modern header frame with glass effect
+header_frame = Frame(main, bg=HEADER_COLOR)
+header_frame.pack(fill=X, padx=20, pady=20)
+header_frame.configure(relief='flat', borderwidth=0)
+
+# Add subtle shadow effect
+shadow_frame = Frame(main, bg='#1a1f2e', height=2)  # Using a dark blue-gray color for shadow
+shadow_frame.pack(fill=X, padx=30)
+
+# Modern title styling
+title_font = ('Segoe UI', 32, 'bold')
+title = Label(header_frame, text='Suspicious Activity Detection System', bg=HEADER_COLOR, fg=TEXT_COLOR)
+title.config(font=title_font, pady=20)
+title.pack()
+
+# Subtitle
+subtitle_font = ('Segoe UI Light', 14)
+subtitle = Label(header_frame, text='Advanced Real-time Monitoring & Detection', bg=HEADER_COLOR, fg=TEXT_COLOR)
+subtitle.config(font=subtitle_font, pady=5)
+subtitle.pack()
+
+# Create control panel frame
+control_frame = Frame(main, bg=BG_COLOR)
+control_frame.pack(fill=X, padx=20, pady=10)
+
+# Modern button styling
+button_font = ('Segoe UI', 11, 'bold')
+button_style = {
+    'font': button_font,
+    'bg': BUTTON_COLOR,
+    'fg': TEXT_COLOR,
+    'width': 25,
+    'relief': 'flat',
+    'pady': 12,
+    'padx': 15,
+    'cursor': 'hand2',
+    'borderwidth': 0
+}
+
+# Button hover effects
+def on_enter(e):
+    e.widget['background'] = BUTTON_HOVER
+
+def on_leave(e):
+    e.widget['background'] = BUTTON_COLOR
+
+# Create left button column
+left_buttons = Frame(control_frame, bg=BG_COLOR)
+left_buttons.pack(side=LEFT, padx=20)
+
+upload_button = Button(left_buttons, text="Upload CCTV Footage", command=upload, **button_style)
+upload_button.pack(pady=5)
+
+depthbutton = Button(left_buttons, text="Generate Frames", command=generateFrame, **button_style)
+depthbutton.pack(pady=5)
+
+live_button = Button(left_buttons, text="Start Live Feed", command=toggle_live_feed, **button_style)
+live_button.pack(pady=5)
+
+# Create right button column
+right_buttons = Frame(control_frame, bg=BG_COLOR)
+right_buttons.pack(side=LEFT, padx=20)
+
+userinterest = Button(right_buttons, text="Detect Suspicious Activity", command=detectActivity, **button_style)
+userinterest.pack(pady=5)
+
+# Path label styling
+pathlabel = Label(right_buttons, wraplength=400, justify=LEFT, bg=BG_COLOR, fg=TEXT_COLOR)
+pathlabel.config(font=('Helvetica', 10))
+pathlabel.pack(pady=10)
+
+# Create output frame
+output_frame = Frame(main, bg=BG_COLOR)
+output_frame.pack(fill=BOTH, expand=True, padx=20, pady=10)
+
+# Modern text area styling
+text_font = ('Cascadia Code', 11)
+text_style = {
+    'font': text_font,
+    'bg': TEXT_AREA_BG,
+    'relief': 'flat',
+    'padx': 10,
+    'pady': 10,
+    'borderwidth': 0,
+    'highlightthickness': 1,
+    'highlightbackground': '#e2e8f0',
+    'highlightcolor': BUTTON_COLOR
+}
+
+# Left text area (Frame Generation Log)
+left_text_frame = LabelFrame(output_frame, text="Frame Generation Log", bg=BG_COLOR, fg=TEXT_COLOR, font=button_font)
+left_text_frame.pack(side=LEFT, fill=BOTH, expand=True, padx=10)
+
+text = Text(left_text_frame, height=20, width=50, **text_style)
+scroll = Scrollbar(left_text_frame)
+text.configure(yscrollcommand=scroll.set)
+scroll.config(command=text.yview)
+text.pack(side=LEFT, fill=BOTH, expand=True, padx=5, pady=5)
+scroll.pack(side=RIGHT, fill=Y)
+
+# Right text area (Detection Results)
+right_text_frame = LabelFrame(output_frame, text="Detection Results", bg=BG_COLOR, fg=TEXT_COLOR, font=button_font)
+right_text_frame.pack(side=LEFT, fill=BOTH, expand=True, padx=10)
+
+text1 = Text(right_text_frame, height=20, width=50, **text_style)
+scroll1 = Scrollbar(right_text_frame)
+text1.configure(yscrollcommand=scroll1.set)
+scroll1.config(command=text1.yview)
+text1.pack(side=LEFT, fill=BOTH, expand=True, padx=5, pady=5)
+scroll1.pack(side=RIGHT, fill=Y)
+
+main.mainloop()
